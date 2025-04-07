@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
 contract TaskManagement {
@@ -5,128 +6,144 @@ contract TaskManagement {
     enum Status { Pending, Completed }
     
     struct Task {
-        uint task_id;
+        uint taskId;
         address doer;
-        Priority hierarchy;
+        Priority priority;
         Status status;
         uint dueDate;
-        string todo;
+        string description;
     }
-    
-    Task[] public taskList;
-    uint public id = 1;
 
-    mapping(address => Task[]) public todoList;
-    mapping(uint => address) public idToOwner;
-    mapping(uint => Task) public idToTask;
-    
-    event TaskCreated(address indexed doer, uint indexed taskId);
-    event TaskEdited(address indexed doer, uint indexed taskId);
-    event TaskDeleted(address indexed doer, uint indexed taskId);
+    mapping(address => Task[]) private userTasks;
+    mapping(uint => address) private taskToOwner;
+    mapping(uint => Task) private taskRegistry;
+
+  
+    event TaskCreated(address indexed owner, uint indexed taskId);
+    event TaskUpdated(address indexed owner, uint indexed taskId);
+    event TaskDeleted(address indexed owner, uint indexed taskId);
+    event DueDateChanged(uint indexed taskId, uint newDueDate);
+
+    uint private taskCounter = 1;
 
     function createTask(
-        string memory taskTodo,
-        Priority hierarchy
-    ) public returns (uint) {
-        uint taskId = id;
+        string calldata description,
+        Priority priority,
+        uint customDueDate
+    ) external returns (uint) {
+        uint dueDate = customDueDate == 0 ? 
+            block.timestamp + 2 days : 
+            customDueDate;
+        
+        require(dueDate > block.timestamp, "Due date must be in future");
+
+        uint newTaskId = taskCounter++;
         Task memory newTask = Task({
-            task_id: taskId,
+            taskId: newTaskId,
             doer: msg.sender,
-            hierarchy: hierarchy,
+            priority: priority,
             status: Status.Pending,
-            dueDate: block.timestamp + 2 days,
-            todo: taskTodo
+            dueDate: dueDate,
+            description: description
         });
 
-        todoList[msg.sender].push(newTask);
-        idToOwner[taskId] = msg.sender;
-        idToTask[taskId] = newTask;
-        id++;
-        
-        emit TaskCreated(msg.sender, taskId);
-        return taskId;
+        userTasks[msg.sender].push(newTask);
+        taskToOwner[newTaskId] = msg.sender;
+        taskRegistry[newTaskId] = newTask;
+
+        emit TaskCreated(msg.sender, newTaskId);
+        return newTaskId;
     }
 
-    function editTask(uint taskId, string memory newTodo) public {
-        require(msg.sender == idToOwner[taskId], "Unauthorized");
-        Task storage task = idToTask[taskId];
-        task.todo = newTodo;
-        
-        // Update the task in the user's todoList
-        Task[] storage userTasks = todoList[msg.sender];
-        for (uint i = 0; i < userTasks.length; i++) {
-            if (userTasks[i].task_id == taskId) {
-                userTasks[i].todo = newTodo;
-                break;
-            }
-        }
-        
-        emit TaskEdited(msg.sender, taskId);
+    function updateTaskDescription(uint taskId, string calldata newDescription) external {
+        require(taskToOwner[taskId] == msg.sender, "Unauthorized");
+        Task storage task = taskRegistry[taskId];
+        task.description = newDescription;
+        _updateTaskInArray(taskId);
+        emit TaskUpdated(msg.sender, taskId);
     }
 
-    function changeTaskStatus(uint taskId) public {
-        require(msg.sender == idToOwner[taskId], "Unauthorized");
-        Task storage task = idToTask[taskId];
+    function completeTask(uint taskId) external {
+        require(taskToOwner[taskId] == msg.sender, "Unauthorized");
+        Task storage task = taskRegistry[taskId];
         task.status = Status.Completed;
-        
-        // Update the task in the user's todoList
-        Task[] storage userTasks = todoList[msg.sender];
-        for (uint i = 0; i < userTasks.length; i++) {
-            if (userTasks[i].task_id == taskId) {
-                userTasks[i].status = Status.Completed;
-                break;
-            }
-        }
+        _updateTaskInArray(taskId);
+        emit TaskUpdated(msg.sender, taskId);
     }
 
-    function deleteTask(uint taskId) public {
-        require(msg.sender == idToOwner[taskId], "Unauthorized");
+    function setDueDate(uint taskId, uint newDueDate) external {
+        require(taskToOwner[taskId] == msg.sender, "Unauthorized");
+        require(newDueDate > block.timestamp, "Invalid due date");
+        
+        Task storage task = taskRegistry[taskId];
+        task.dueDate = newDueDate;
+        _updateTaskInArray(taskId);
+        
+        emit DueDateChanged(taskId, newDueDate);
+        emit TaskUpdated(msg.sender, taskId);
+    }
+
+    function deleteTask(uint taskId) external {
+        require(taskToOwner[taskId] == msg.sender, "Unauthorized");
         
         // Remove from mappings
-        delete idToOwner[taskId];
-        delete idToTask[taskId];
+        delete taskToOwner[taskId];
+        delete taskRegistry[taskId];
         
-        // Remove from todoList
-        Task[] storage userTasks = todoList[msg.sender];
-        for (uint i = 0; i < userTasks.length; i++) {
-            if (userTasks[i].task_id == taskId) {
-                if (i < userTasks.length - 1) {
-                    userTasks[i] = userTasks[userTasks.length - 1];
+        // Remove from user's task array
+        Task[] storage tasks = userTasks[msg.sender];
+        for (uint i = 0; i < tasks.length; i++) {
+            if (tasks[i].taskId == taskId) {
+                if (i < tasks.length - 1) {
+                    tasks[i] = tasks[tasks.length - 1];
                 }
-                userTasks.pop();
+                tasks.pop();
                 break;
             }
         }
-        
+
         emit TaskDeleted(msg.sender, taskId);
     }
 
-    function getTasksByStatus(Status status) public view returns (Task[] memory) {
-        Task[] storage userTasks = todoList[msg.sender];
-        Task[] memory filteredTasks = new Task[](userTasks.length);
+    function getTasksByStatus(Status status) external view returns (Task[] memory) {
+        Task[] storage tasks = userTasks[msg.sender];
         uint count = 0;
         
-        for (uint i = 0; i < userTasks.length; i++) {
-            if (userTasks[i].status == status) {
-                filteredTasks[count] = userTasks[i];
-                count++;
+        // First pass to count matches
+        for (uint i = 0; i < tasks.length; i++) {
+            if (tasks[i].status == status) count++;
+        }
+
+        
+        Task[] memory result = new Task[](count);
+        uint index = 0;
+        
+        for (uint i = 0; i < tasks.length; i++) {
+            if (tasks[i].status == status) {
+                result[index++] = tasks[i];
             }
         }
-        
+
+        return result;
     }
-    function setDueDate(uint taskId, uint newDueDate) public {
-    require(msg.sender == idToOwner[taskId], "Unauthorized");
-    Task storage task = idToTask[taskId];
-    task.dueDate = newDueDate;
-    
-    // Update the task in the user's todoList array
-    Task[] storage userTasks = todoList[msg.sender];
-    for (uint i = 0; i < userTasks.length; i++) {
-        if (userTasks[i].task_id == taskId) {
-            userTasks[i].dueDate = newDueDate;
-            break;
+
+    function getUserTasks() external view returns (Task[] memory) {
+        return userTasks[msg.sender];
+    }
+
+    function getTaskDetails(uint taskId) external view returns (Task memory) {
+        require(taskToOwner[taskId] == msg.sender, "Unauthorized");
+        return taskRegistry[taskId];
+    }
+
+
+    function _updateTaskInArray(uint taskId) private {
+        Task[] storage tasks = userTasks[msg.sender];
+        for (uint i = 0; i < tasks.length; i++) {
+            if (tasks[i].taskId == taskId) {
+                tasks[i] = taskRegistry[taskId];
+                break;
+            }
         }
     }
 }
-}
-       
